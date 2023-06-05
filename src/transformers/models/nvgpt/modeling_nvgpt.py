@@ -930,7 +930,7 @@ class NVGPTForCausalLM(NVGPTPreTrainedModel):
         self.model.embedding = value
 
     def get_output_embeddings(self):
-        return self.output_layer
+        return self.lm_head
 
     def set_output_embeddings(self, new_embeddings):
         self.output_layer = new_embeddings
