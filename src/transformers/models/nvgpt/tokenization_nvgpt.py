@@ -22,7 +22,7 @@ PRETRAINED_VOCAB_FILES_MAP = {
     },
 }
 PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {
-    "nvgpt-tokenizer": 2048,
+    "nvgpt-tokenizer": 4096,
 }
 
 
