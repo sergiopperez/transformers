@@ -362,12 +362,6 @@ class NVGPTCoreAttention(torch.nn.Module):
         # ===================================
         # Raw attention scores. [b, np, s, s]
         # ===================================        
-        
-        ## apply relative positional encoding (rotary embedding)
-        #if rotary_pos_emb is not None:
-        #    q_pos_emb, k_pos_emb = rotary_pos_emb
-        #    query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb)
-        #    key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb)
 
         if past_key_values is not None:
             past_key, past_value = past_key_values            
