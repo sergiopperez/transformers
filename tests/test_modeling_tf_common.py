@@ -348,7 +348,7 @@ class TFModelTesterMixin:
 
             with tf.Graph().as_default() as g:
                 model = model_class(config)
-                model(model.dummy_inputs)
+                model.build()
 
                 for op in g.get_operations():
                     model_op_names.add(op.node_def.op)
@@ -375,7 +375,7 @@ class TFModelTesterMixin:
 
         for model_class in self.all_model_classes:
             model = model_class(config)
-            model(model.dummy_inputs)
+            model.build()
 
             onnx_model_proto, _ = tf2onnx.convert.from_keras(model, opset=self.onnx_min_opset)
 
@@ -1013,7 +1013,7 @@ class TFModelTesterMixin:
             check_hidden_states_output(config, inputs_dict, model_class)
 
     def test_model_common_attributes(self):
-        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
+        config, _ = self.model_tester.prepare_config_and_inputs_for_common()
         text_in_text_out_models = (
             get_values(TF_MODEL_FOR_CAUSAL_LM_MAPPING)
             + get_values(TF_MODEL_FOR_MASKED_LM_MAPPING)
@@ -1023,24 +1023,27 @@ class TFModelTesterMixin:
 
         for model_class in self.all_model_classes:
             model = model_class(config)
-            assert isinstance(model.get_input_embeddings(), tf.keras.layers.Layer)
-            if model_class in text_in_text_out_models:
-                x = model.get_output_embeddings()
-                assert isinstance(x, tf.keras.layers.Layer)
-                name = model.get_bias()
-                assert isinstance(name, dict)
-                for k, v in name.items():
-                    assert isinstance(v, tf.Variable)
+            self.assertIsInstance(model.get_input_embeddings(), tf.keras.layers.Layer)
+
+            legacy_text_in_text_out = model.get_lm_head() is not None
+            if model_class in text_in_text_out_models or legacy_text_in_text_out:
+                out_embeddings = model.get_output_embeddings()
+                self.assertIsInstance(out_embeddings, tf.keras.layers.Layer)
+                bias = model.get_bias()
+                if bias is not None:
+                    self.assertIsInstance(bias, dict)
+                    for _, v in bias.items():
+                        self.assertIsInstance(v, tf.Variable)
             elif model_class in speech_in_text_out_models:
-                x = model.get_output_embeddings()
-                assert isinstance(x, tf.keras.layers.Layer)
-                name = model.get_bias()
-                assert name is None
+                out_embeddings = model.get_output_embeddings()
+                self.assertIsInstance(out_embeddings, tf.keras.layers.Layer)
+                bias = model.get_bias()
+                self.assertIsNone(bias)
             else:
-                x = model.get_output_embeddings()
-                assert x is None
-                name = model.get_bias()
-                assert name is None
+                out_embeddings = model.get_output_embeddings()
+                assert out_embeddings is None
+                bias = model.get_bias()
+                self.assertIsNone(bias)
 
     def test_determinism(self):
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
@@ -1180,7 +1183,7 @@ class TFModelTesterMixin:
         def _get_word_embedding_weight(model, embedding_layer):
             if isinstance(embedding_layer, tf.keras.layers.Embedding):
                 # builds the embeddings layer
-                model(model.dummy_inputs)
+                model.build()
                 return embedding_layer.embeddings
             else:
                 return model._get_word_embedding_weight(embedding_layer)
@@ -1243,7 +1246,7 @@ class TFModelTesterMixin:
             old_total_size = config.vocab_size
             new_total_size = old_total_size + new_tokens_size
             model = model_class(config=copy.deepcopy(config))  # `resize_token_embeddings` mutates `config`
-            model(model.dummy_inputs)  # builds the embeddings layer
+            model.build()
             model.resize_token_embeddings(new_total_size)
 
             # fetch the output for an input exclusively made of new members of the vocabulary
@@ -1684,14 +1687,10 @@ class TFModelTesterMixin:
                 if tensor.dtype.is_integer:
                     self.assertTrue(tensor.dtype == tf.int32, "Integer dummy inputs should be tf.int32!")
 
-            # Also confirm that the serving sig uses int32
-            if hasattr(model, "serving"):
-                serving_sig = model.serving.input_signature
-                for key, tensor_spec in serving_sig[0].items():
-                    if tensor_spec.dtype.is_integer:
-                        self.assertTrue(
-                            tensor_spec.dtype == tf.int32, "Serving signatures should use tf.int32 for ints!"
-                        )
+            # Also confirm that the input_signature uses int32
+            for key, tensor_spec in model.input_signature.items():
+                if tensor_spec.dtype.is_integer:
+                    self.assertTrue(tensor_spec.dtype == tf.int32, "Input signatures should use tf.int32 for ints!")
 
     def test_generate_with_headmasking(self):
         attention_names = ["encoder_attentions", "decoder_attentions", "cross_attentions"]
@@ -2313,8 +2312,8 @@ class UtilsFunctionsTest(unittest.TestCase):
                 # Finally, check the model can be reloaded
                 new_model = TFBertModel.from_pretrained(tmp_dir)
 
-                model(model.dummy_inputs)
-                new_model(model.dummy_inputs)
+                model.build()
+                new_model.build()
 
                 for p1, p2 in zip(model.weights, new_model.weights):
                     self.assertTrue(np.allclose(p1.numpy(), p2.numpy()))
@@ -2440,7 +2439,7 @@ class TFModelPushToHubTester(unittest.TestCase):
         )
         model = TFBertModel(config)
         # Make sure model is properly initialized
-        _ = model(model.dummy_inputs)
+        model.build()
 
         logging.set_verbosity_info()
         logger = logging.get_logger("transformers.utils.hub")
@@ -2509,7 +2508,7 @@ class TFModelPushToHubTester(unittest.TestCase):
         )
         model = TFBertModel(config)
         # Make sure model is properly initialized
-        _ = model(model.dummy_inputs)
+        model.build()
 
         model.push_to_hub("valid_org/test-model-tf-org", use_auth_token=self._token)
 
