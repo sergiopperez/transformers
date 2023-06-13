@@ -825,7 +825,7 @@ class NVGPTModel(NVGPTPreTrainedModel):
         else:
             raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
 
-        seq_length_with_past = seq_length
+        seq_length_with_past = seq_length        
         past_key_values_length = 0
         
         if past_key_values is not None:
@@ -1102,7 +1102,10 @@ class NVGPTForCausalLM(NVGPTPreTrainedModel):
         from configuration_nvgpt import NVGPTConfig
 
         tar = tarfile.open(nemo_file)
-        checkpoint = torch.load(tar.extractfile('model_weights.ckpt'))
+        try:
+            checkpoint = torch.load(tar.extractfile('model_weights.ckpt'))  
+        except:
+            checkpoint = torch.load(tar.extractfile('./model_weights.ckpt'))  
         ckpt_keys = list(checkpoint.keys())
         keymap = {}
         for key in ckpt_keys:
@@ -1120,7 +1123,11 @@ class NVGPTForCausalLM(NVGPTPreTrainedModel):
 
         del checkpoint
 
-        nemo_cfg = yaml.safe_load(tar.extractfile('model_config.yaml').read())
+        try:
+            nemo_cfg = yaml.safe_load(tar.extractfile('model_config.yaml').read())
+        except:
+            nemo_cfg = yaml.safe_load(tar.extractfile('./model_config.yaml').read())
+
         config = NVGPTConfig(
                         hidden_size=nemo_cfg['hidden_size'],
                         ffn_hidden_size=nemo_cfg['ffn_hidden_size'],
