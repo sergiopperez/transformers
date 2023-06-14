@@ -73,6 +73,7 @@ from . import (
     efficientformer,
     efficientnet,
     electra,
+    encodec,
     encoder_decoder,
     ernie,
     ernie_m,
