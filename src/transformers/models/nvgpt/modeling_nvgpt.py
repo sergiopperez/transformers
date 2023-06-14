@@ -17,13 +17,13 @@
 
 import math
 import os
-
+import numbers
 import torch
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from typing import List, Optional, Tuple, Union
-
+from torch.nn.parameter import Parameter
 from einops import rearrange
 from torch import einsum
 from torch import Tensor, Size
@@ -264,7 +264,7 @@ NVGPT_INPUTS_DOCSTRING = r"""
 """
 
 _shape_t = Union[int, List[int], Size]
-class LayerNorm1P(torch.nn.LayerNorm):
+class NVGPTLayerNorm1P(torch.nn.LayerNorm):
     __constants__ = ['normalized_shape', 'eps', 'elementwise_affine']
     normalized_shape: Tuple[int, ...]
     eps: float
@@ -278,6 +278,68 @@ class LayerNorm1P(torch.nn.LayerNorm):
     def forward(self, input: Tensor) -> Tensor:
         return torch.nn.functional.layer_norm(
             input, self.normalized_shape, self.weight + 1., self.bias, self.eps)     
+
+class NVGPTLayerNorm(torch.nn.LayerNorm):
+    __constants__ = ['normalized_shape', 'eps', 'elementwise_affine']
+    normalized_shape: Tuple[int, ...]
+    eps: float
+    elementwise_affine: bool
+
+    def __init__(self, normalized_shape: _shape_t, eps: float = 1e-5, elementwise_affine: bool = True,
+                 device=None, dtype=None) -> None:
+        
+        super().__init__(normalized_shape, eps, elementwise_affine, device, dtype)
+
+    def forward(self, input: Tensor) -> Tensor:
+        return torch.nn.functional.layer_norm(
+            input, self.normalized_shape, self.weight, self.bias, self.eps)  
+
+# Adapted from https://github.com/NVIDIA/apex/blob/ba027dd0bac621a5c3d16bfb90d73e2d48d2588e/apex/normalization/fused_layer_norm.py#L300
+
+# Reference implementation from Huggingface
+def manual_rms_norm(input, normalized_shape, weight, eps):
+    # layer norm should always be calculated in float32
+    dims = tuple(i for i in range(-1, -len(normalized_shape)-1, -1))
+    variance = input.to(torch.float32).pow(2).mean(dims, keepdim=True)
+    input = input * torch.rsqrt(variance + eps)
+
+    if weight is None:
+        return input
+
+    # convert into half-precision if necessary
+    if weight.dtype in [torch.float16, torch.bfloat16]:
+        input = input.to(weight.dtype)
+
+    return weight * input
+
+class NVGPTRMSNorm(torch.nn.Module):
+    r"""Applies RMS Normalization over a mini-batch of inputs
+    .. _`Root Mean Square Layer Normalization`: https://arxiv.org/pdf/1910.07467.pdf
+    """
+
+    def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True):
+        super().__init__()
+
+        if isinstance(normalized_shape, numbers.Integral):
+            normalized_shape = (normalized_shape,)
+        self.normalized_shape = torch.Size(normalized_shape)
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+        if self.elementwise_affine:
+            self.weight = Parameter(torch.empty(*normalized_shape))
+        else:
+            self.register_parameter("weight", None)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if self.elementwise_affine:
+            torch.nn.init.ones_(self.weight)
+
+    def forward(self, input):
+        return manual_rms_norm(input, self.normalized_shape, self.weight, self.eps)
+
+    def extra_repr(self):
+        return "{normalized_shape}, eps={eps}, " "elementwise_affine={elementwise_affine}".format(**self.__dict__)
     
 class NVGPTRotaryEmbedding(torch.nn.Module):
     def __init__(self, dim):
@@ -334,7 +396,6 @@ class NVGPTMLP(nn.Module):
 
         return self.dense_4h_to_h(intermediate_parallel)
     
-
 class NVGPTCoreAttention(torch.nn.Module):
     """ Causal scaled dot product attention    
     """
@@ -629,8 +690,19 @@ class NVGPTDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         self.self_attention = NVGPTAttention(config=config)
         self.mlp = NVGPTMLP(config=config)
-        self.input_layernorm = LayerNorm1P(config.hidden_size, eps=config.layernorm_eps)
-        self.post_attention_layernorm = LayerNorm1P(config.hidden_size, eps=config.layernorm_eps)
+
+        if config.normalization not in ['layernorm', 'layernorm1p', 'rmsnorm']:
+            raise ValueError(f'normalization must be "layernorm", "layernorm1p" or "rmsnorm", found {config.normalization}')
+        
+        if config.normalization == 'layernorm':
+            self.input_layernorm = NVGPTLayerNorm(config.hidden_size, eps=config.layernorm_eps)
+            self.post_attention_layernorm = NVGPTLayerNorm(config.hidden_size, eps=config.layernorm_eps)
+        elif config.normalization == 'layernorm1p':
+            self.input_layernorm = NVGPTLayerNorm1P(config.hidden_size, eps=config.layernorm_eps)
+            self.post_attention_layernorm = NVGPTLayerNorm1P(config.hidden_size, eps=config.layernorm_eps)
+        else:
+            self.input_layernorm = NVGPTRMSNorm(config.hidden_size, eps=config.layernorm_eps)       
+            self.post_attention_layernorm = NVGPTRMSNorm(config.hidden_size, eps=config.layernorm_eps)
 
     def forward(
         self,
@@ -784,7 +856,16 @@ class NVGPTModel(NVGPTPreTrainedModel):
 
         self.embedding = torch.nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = torch.nn.ModuleList([NVGPTDecoderLayer(config) for _ in range(config.num_layers)])
-        self.final_layernorm = LayerNorm1P(config.hidden_size, eps=config.layernorm_eps)        
+
+        if config.normalization not in ['layernorm', 'layernorm1p', 'rmsnorm']:
+            raise ValueError(f'normalization must be "layernorm", "layernorm1p" or "rmsnorm", found {config.normalization}')
+        
+        if config.normalization == 'layernorm':
+            self.final_layernorm = NVGPTLayerNorm(config.hidden_size, eps=config.layernorm_eps)
+        elif config.normalization == 'layernorm1p':
+            self.final_layernorm = NVGPTLayerNorm1P(config.hidden_size, eps=config.layernorm_eps)
+        else:
+            self.final_layernorm = NVGPTRMSNorm(config.hidden_size, eps=config.layernorm_eps)
 
         self.gradient_checkpointing = config.gradient_checkpointing
         
@@ -1132,7 +1213,8 @@ class NVGPTForCausalLM(NVGPTPreTrainedModel):
                         hidden_size=nemo_cfg['hidden_size'],
                         ffn_hidden_size=nemo_cfg['ffn_hidden_size'],
                         num_layers=nemo_cfg['num_layers'],
-                        num_attention_heads=nemo_cfg['num_attention_heads']
+                        num_attention_heads=nemo_cfg['num_attention_heads'],
+                        normalization=nemo_cfg['normalization'],
         )
 
         model = cls(config)

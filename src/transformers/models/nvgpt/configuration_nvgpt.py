@@ -97,6 +97,7 @@ class NVGPTConfig(PretrainedConfig):
         num_layers=24,
         num_attention_heads=16,
         activation="silu",
+        normalization="layernorm1p",
         max_position_embeddings=4096,
         initializer_range=0.014,
         layernorm_eps=1.0e-05,
@@ -130,7 +131,7 @@ class NVGPTConfig(PretrainedConfig):
         self.bias = bias
         self.kv_channels = kv_channels        
         self.gradient_checkpointing = gradient_checkpointing
-
+        self.normalization = normalization
         self.hidden_dropout = hidden_dropout
         self.attention_dropout = attention_dropout
         self.ffn_dropout = ffn_dropout
