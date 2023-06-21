@@ -117,7 +117,7 @@ class EncodecModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase)
     test_pruning = False
     test_headmasking = False
     test_resize_embeddings = False
-    pipeline_model_mapping = {}
+    pipeline_model_mapping = {"feature-extraction": EncodecModel} if is_torch_available() else {}
     input_name = "input_values"
 
     def _prepare_for_class(self, inputs_dict, model_class, return_labels=False):
@@ -384,6 +384,11 @@ class EncodecModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase)
                             [0.0, 1.0],
                             msg=f"Parameter {name} of model {model_class} seems not properly initialized",
                         )
+
+    def test_identity_shortcut(self):
+        config, inputs_dict = self.model_tester.prepare_config_and_inputs()
+        config.use_conv_shortcut = False
+        self.model_tester.create_and_check_model_forward(config, inputs_dict)
 
 
 def normalize(arr):
