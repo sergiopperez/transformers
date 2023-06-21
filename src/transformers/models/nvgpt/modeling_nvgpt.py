@@ -511,7 +511,7 @@ class NVGPTCoreAttention(torch.nn.Module):
             
         return context_layer, attention_scores, past_key_values
 
-class NVGPTFlashSelfAttention(torch.nn.Module):
+class HAZYNVGPTFlashSelfAttention(torch.nn.Module):
     """Implement the scaled dot product attention with softmax.
     Arguments
     ---------
@@ -537,7 +537,7 @@ class NVGPTFlashSelfAttention(torch.nn.Module):
         ---------
             q, k, v: The tensor containing the query, key, and value. (B, S, H, D)
         """
-
+        
         assert all((i.dtype in [torch.float16, torch.bfloat16] for i in (q,k,v)))
         assert all((i.is_cuda for i in (q,k,v)))
 
@@ -569,8 +569,61 @@ class NVGPTFlashSelfAttention(torch.nn.Module):
         )
 
         output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
+        print(f'flash-attn: {output.shape}')
         return output
-    
+
+class NVGPTFlashSelfAttention(torch.nn.Module):
+    """Implement the scaled dot product attention with softmax using pytorch scaled_dot_product_attention().
+    Arguments
+    ---------
+        softmax_scale: The temperature to use for the softmax attention.
+                      (default: 1/sqrt(d_keys) where d_keys is computed at
+                      runtime)
+        attention_dropout: The dropout rate to apply to the attention
+                           (default: 0.0)
+    """
+    def __init__(self, causal=False, softmax_scale=None, attention_dropout=0.0,
+                 device=None, dtype=None):
+        super().__init__()
+
+        torch.backends.cuda.enable_flash_sdp(True)        
+        assert rearrange is not None, 'Please install einops first, e.g., with pip install einops'
+        self.causal = causal
+        self.softmax_scale = softmax_scale
+        self.dropout_p = attention_dropout
+
+    def forward(self, query, key, value):
+        """Implements the multihead softmax attention.
+        Arguments
+        ---------
+            query, key, value: The tensor containing the query, key, and value. (B, S, H, D)
+        """
+        #assert all((i.dtype in [torch.float16, torch.bfloat16] for i in (q,k,v)))
+        #assert all((i.is_cuda for i in (q,k,v)))
+        batch_size, seqlen_q = query.shape[0], query.shape[1]
+        seqlen_k = key.shape[1]
+
+        query, key, value = [x.transpose(1,2) for x in [query, key, value]]
+
+        if self.training:
+            # during training q,k,v always have same seqlen
+            assert seqlen_k == seqlen_q
+
+            is_causal = self.causal
+        else:
+            # turn off FA causal mask after first inference autoregressive iteration
+            # only on first autoregressive step q,k,v have same seqlen
+            self.dropout_p = 0
+
+        output = torch.nn.functional.scaled_dot_product_attention(query=query, 
+                                                                  key=key, 
+                                                                  value=value, 
+                                                                  dropout_p=self.dropout_p,
+                                                                  is_causal=True)
+        output = output.transpose(1,2).contiguous()
+        #output = rearrange(output, 'b s h d -> b s (h d)')
+        return output
+        
 class NVGPTAttention(torch.nn.Module):
     """Multi-headed casual attention
         
@@ -590,12 +643,12 @@ class NVGPTAttention(torch.nn.Module):
         self.max_position_embeddings = config.max_position_embeddings
         self.use_flash_attention = config.use_flash_attention
 
-        if self.use_flash_attention:
-            if flash_attn_unpadded_func is None:
-                raise ImportError('FlashAttention is not installed, please install with '
-                                  'pip install flash-attn')
-            if rearrange is None:
-                raise ImportError('einops is not installed, please install with pip install einops')
+        #if self.use_flash_attention:
+        #    if flash_attn_unpadded_func is None:
+        #        raise ImportError('FlashAttention is not installed, please install with '
+        #                          'pip install flash-attn')
+        #    if rearrange is None:
+        #        raise ImportError('einops is not installed, please install with pip install einops')
             
         if (self.hidden_size_per_attention_head * self.num_attention_heads) != self.hidden_size:
             raise ValueError(
@@ -624,7 +677,7 @@ class NVGPTAttention(torch.nn.Module):
         output_attentions: bool = False,
         use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-                
+
         # hidden_states: [sq, b, h]
 
         # =====================
