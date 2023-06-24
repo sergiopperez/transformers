@@ -28,10 +28,10 @@ from einops import rearrange
 from torch import einsum
 from torch import Tensor, Size
 
-#try:
-#    from flash_attn.flash_attn_interface import flash_attn_unpadded_func
-#except ImportError:
-#    flash_attn_unpadded_func = None
+try:
+    from flash_attn.flash_attn_interface import flash_attn_unpadded_func
+except ImportError:
+    flash_attn_unpadded_func = None
 
 from ...activations import ACT2FN
 from ...utils import (
@@ -511,7 +511,7 @@ class NVGPTCoreAttention(torch.nn.Module):
             
         return context_layer, attention_scores, past_key_values
 
-class HazyNVGPTFlashSelfAttention(torch.nn.Module):
+class NVGPTFlashSelfAttention(torch.nn.Module):
     """Implement the scaled dot product attention with softmax.
     Arguments
     ---------
@@ -569,10 +569,9 @@ class HazyNVGPTFlashSelfAttention(torch.nn.Module):
         )
 
         output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
-        print(f'flash-attn: {output.shape}')
         return output
 
-class NVGPTFlashSelfAttention(torch.nn.Module):
+class PyTorchNVGPTFlashSelfAttention(torch.nn.Module):
     """Implement the scaled dot product attention with softmax using pytorch scaled_dot_product_attention().
     Arguments
     ---------
@@ -643,12 +642,12 @@ class NVGPTAttention(torch.nn.Module):
         self.max_position_embeddings = config.max_position_embeddings
         self.use_flash_attention = config.use_flash_attention
 
-        #if self.use_flash_attention:
-        #    if flash_attn_unpadded_func is None:
-        #        raise ImportError('FlashAttention is not installed, please install with '
-        #                          'pip install flash-attn')
-        #    if rearrange is None:
-        #        raise ImportError('einops is not installed, please install with pip install einops')
+        if self.use_flash_attention:
+            if flash_attn_unpadded_func is None:
+                raise ImportError('FlashAttention is not installed, please install with '
+                                  'pip install flash-attn')
+            if rearrange is None:
+                raise ImportError('einops is not installed, please install with pip install einops')
             
         if (self.hidden_size_per_attention_head * self.num_attention_heads) != self.hidden_size:
             raise ValueError(
@@ -1233,7 +1232,7 @@ class NVGPTForCausalLM(NVGPTPreTrainedModel):
     def from_nemo_file(cls, nemo_file):
         import tarfile
         import yaml
-        from configuration_nvgpt import NVGPTConfig
+        #from configuration_nvgpt import NVGPTConfig
 
         tar = tarfile.open(nemo_file)
         try:
