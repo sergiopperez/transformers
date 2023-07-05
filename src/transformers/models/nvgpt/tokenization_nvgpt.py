@@ -43,9 +43,9 @@ class NVGPTTokenizer(PreTrainedTokenizer):
     def __init__(
         self,
         vocab_file,
-        unk_token="<|endoftext|>",
-        bos_token="<|endoftext|>",
-        eos_token="<|endoftext|>",
+        uunk_token="<unk>",
+        bos_token="<s>",
+        eos_token="</s>",
         pad_token=None,
         sp_model_kwargs: Optional[Dict[str, Any]] = None,
         add_bos_token=True,
