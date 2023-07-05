@@ -43,7 +43,7 @@ class NVGPTTokenizer(PreTrainedTokenizer):
     def __init__(
         self,
         vocab_file,
-        uunk_token="<unk>",
+        unk_token="<unk>",
         bos_token="<s>",
         eos_token="</s>",
         pad_token=None,
