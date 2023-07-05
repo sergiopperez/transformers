@@ -641,10 +641,12 @@ class NVGPTAttention(torch.nn.Module):
         self.hidden_size_per_attention_head = self.hidden_size // self.num_attention_heads
         self.max_position_embeddings = config.max_position_embeddings
         self.use_flash_attention = config.use_flash_attention
+        self.use_native_pytorch_flash_attention = config.use_native_pytorch_flash_attention
 
         if self.use_flash_attention:
-            if flash_attn_unpadded_func is None:
-                raise ImportError('FlashAttention is not installed, please install with '
+            if self.use_native_pytorch_flash_attention:
+                if flash_attn_unpadded_func is None:
+                    raise ImportError('FlashAttention is not installed, please install with '
                                   'pip install flash-attn')
             if rearrange is None:
                 raise ImportError('einops is not installed, please install with pip install einops')
@@ -660,10 +662,14 @@ class NVGPTAttention(torch.nn.Module):
 
         self.core_attention = NVGPTCoreAttention(config=config)
         if self.use_flash_attention:
-            self.core_attention_flash = NVGPTFlashSelfAttention(
-                causal=True, attention_dropout=config.attention_dropout
-            )
-                
+            if self.use_native_pytorch_flash_attention:
+                self.core_attention_flash = PyTorchNVGPTFlashSelfAttention(
+                    causal=True, attention_dropout=config.attention_dropout
+                )
+            else:
+                self.core_attention_flash = NVGPTFlashSelfAttention(
+                    causal=True, attention_dropout=config.attention_dropout
+                )                
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_attention_heads, self.hidden_size_per_attention_head).transpose(1, 2).contiguous()
 

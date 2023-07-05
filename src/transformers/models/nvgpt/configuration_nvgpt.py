@@ -113,7 +113,8 @@ class NVGPTConfig(PretrainedConfig):
         pad_token_id=0,
         bos_token_id=1,
         eos_token_id=2,
-        tie_word_embeddings=False,      
+        tie_word_embeddings=False,
+        use_native_pytorch_flash_attention=False,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -135,6 +136,7 @@ class NVGPTConfig(PretrainedConfig):
         self.hidden_dropout = hidden_dropout
         self.attention_dropout = attention_dropout
         self.ffn_dropout = ffn_dropout
+        self.use_native_pytorch_flash_attention = use_native_pytorch_flash_attention
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
