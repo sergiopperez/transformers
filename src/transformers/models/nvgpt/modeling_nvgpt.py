@@ -1240,42 +1240,40 @@ class NVGPTForCausalLM(NVGPTPreTrainedModel):
         import yaml
         #from configuration_nvgpt import NVGPTConfig
 
-        tar = tarfile.open(nemo_file)
-        try:
-            checkpoint = torch.load(tar.extractfile('model_weights.ckpt'))  
-        except:
-            checkpoint = torch.load(tar.extractfile('./model_weights.ckpt'))  
-        ckpt_keys = list(checkpoint.keys())
-        keymap = {}
-        for key in ckpt_keys:
-            if not 'output_layer' in key:
-                new_key = key.replace('language_model.','').replace('encoder.','').replace('word_embeddings.','')
-            else:
-                new_key = key.replace('model.language_model.','').replace('encoder.','').replace('word_embeddings.','').replace('output_layer','lm_head')
+        with tarfile.open(nemo_file) as tar:
+            # Instantiate the model first, then load weights
+            try:
+                nemo_cfg = yaml.safe_load(tar.extractfile('model_config.yaml').read())
+            except:
+                nemo_cfg = yaml.safe_load(tar.extractfile('./model_config.yaml').read())
 
-            keymap[key] = new_key
+            config = NVGPTConfig(
+                            hidden_size=nemo_cfg['hidden_size'],
+                            ffn_hidden_size=nemo_cfg['ffn_hidden_size'],
+                            num_layers=nemo_cfg['num_layers'],
+                            num_attention_heads=nemo_cfg['num_attention_heads'],
+                            normalization=nemo_cfg['normalization'],
+            )
+            
+            # Initialize and cast weights
+            dtype = torch.bfloat16 if nemo_cfg['precision'] == 'bf16' else torch.float16
+            model = cls(config).to(dtype)
 
-        def rekey(inp_dict, keys_replace):
-            return {keys_replace.get(k, k): v for k, v in inp_dict.items()}
+            try:
+                checkpoint = torch.load(tar.extractfile('model_weights.ckpt'))  
+            except:
+                checkpoint = torch.load(tar.extractfile('./model_weights.ckpt'))
+            ckpt_keys = list(checkpoint.keys())
+            
+            for key in ckpt_keys:
+                if not 'output_layer' in key:
+                    new_key = key.replace('language_model.','').replace('encoder.','').replace('word_embeddings.','')
+                else:
+                    new_key = key.replace('model.language_model.','').replace('encoder.','').replace('word_embeddings.','').replace('output_layer','lm_head')
 
-        new_ckpt = rekey(checkpoint, keymap)
+                checkpoint[new_key] = checkpoint[key]
+                del checkpoint[key]            
 
-        del checkpoint
-
-        try:
-            nemo_cfg = yaml.safe_load(tar.extractfile('model_config.yaml').read())
-        except:
-            nemo_cfg = yaml.safe_load(tar.extractfile('./model_config.yaml').read())
-
-        config = NVGPTConfig(
-                        hidden_size=nemo_cfg['hidden_size'],
-                        ffn_hidden_size=nemo_cfg['ffn_hidden_size'],
-                        num_layers=nemo_cfg['num_layers'],
-                        num_attention_heads=nemo_cfg['num_attention_heads'],
-                        normalization=nemo_cfg['normalization'],
-        )
-
-        model = cls(config)
-        model.load_state_dict(new_ckpt)
+            model.load_state_dict(checkpoint)
+            del checkpoint
         return model
-    
