@@ -153,7 +153,14 @@ class EfficientNetImageProcessor(BaseImageProcessor):
         **kwargs,
     ):
         """
-        Rescale an image by a scale factor. image = image * scale.
+        Rescale an image by a scale factor.
+
+        If `offset` is `True`, the image has its values rescaled by `scale` and then offset by 1. If `scale` is
+        1/127.5, the image is rescaled between [-1, 1].
+            image = image * scale - 1
+
+        If `offset` is `False`, and `scale` is 1/255, the image is rescaled between [0, 1].
+            image = image * scale
 
         Args:
             image (`np.ndarray`):
@@ -165,13 +172,11 @@ class EfficientNetImageProcessor(BaseImageProcessor):
             data_format (`str` or `ChannelDimension`, *optional*):
                 The channel dimension format of the image. If not provided, it will be the same as the input image.
         """
+        rescaled_image = rescale(image, scale=scale, data_format=data_format, **kwargs)
+
         if offset:
-            rescaled_image = (image - 127.5) * scale
-            if data_format is not None:
-                rescaled_image = to_channel_dimension_format(rescaled_image, data_format)
-            rescaled_image = rescaled_image.astype(np.float32)
-        else:
-            rescaled_image = rescale(image, scale=scale, data_format=data_format, **kwargs)
+            rescaled_image = rescaled_image - 1
+
         return rescaled_image
 
     def preprocess(

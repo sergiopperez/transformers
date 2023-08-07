@@ -167,6 +167,7 @@ class VivitImageProcessor(BaseImageProcessor):
             raise ValueError(f"Size must have 'height' and 'width' or 'shortest_edge' as keys. Got {size.keys()}")
         return resize(image, size=output_size, resample=resample, data_format=data_format, **kwargs)
 
+    # Copied from transformers.models.efficientnet.image_processing_efficientnet.EfficientNetImageProcessor.rescale
     def rescale(
         self,
         image: np.ndarray,
@@ -178,23 +179,29 @@ class VivitImageProcessor(BaseImageProcessor):
         """
         Rescale an image by a scale factor.
 
-        If offset is `True`, image scaled between [-1, 1]: image = (image - 127.5) * scale. If offset is `False`, image
-        scaled between [0, 1]: image = image * scale
+        If `offset` is `True`, the image has its values rescaled by `scale` and then offset by 1. If `scale` is
+        1/127.5, the image is rescaled between [-1, 1].
+            image = image * scale - 1
+
+        If `offset` is `False`, and `scale` is 1/255, the image is rescaled between [0, 1].
+            image = image * scale
 
         Args:
             image (`np.ndarray`):
                 Image to rescale.
             scale (`int` or `float`):
                 Scale to apply to the image.
-           offset (`bool`, *optional*):
+            offset (`bool`, *optional*):
                 Whether to scale the image in both negative and positive directions.
             data_format (`str` or `ChannelDimension`, *optional*):
                 The channel dimension format of the image. If not provided, it will be the same as the input image.
         """
-        image = image.astype(np.float32)
+        rescaled_image = rescale(image, scale=scale, data_format=data_format, **kwargs)
+
         if offset:
-            image = image - (scale / 2)
-        return rescale(image, scale=scale, data_format=data_format, **kwargs)
+            rescaled_image = rescaled_image - 1
+
+        return rescaled_image
 
     def _preprocess_image(
         self,
