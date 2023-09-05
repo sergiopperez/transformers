@@ -31,14 +31,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 from packaging import version
 from torch import Tensor, nn
-from torch.nn import CrossEntropyLoss
+from torch.nn import CrossEntropyLoss, Identity
 
 from .activations import get_activation
 from .configuration_utils import PretrainedConfig
-from .deepspeed import deepspeed_config, is_deepspeed_zero3_enabled
 from .dynamic_module_utils import custom_object_save
 from .generation import GenerationConfig, GenerationMixin
-from .lib_integrations import PeftAdapterMixin
+from .integrations import PeftAdapterMixin, deepspeed_config, is_deepspeed_zero3_enabled
 from .pytorch_utils import (  # noqa: F401
     Conv1D,
     apply_chunking_to_forward,
@@ -97,6 +96,7 @@ if is_accelerate_available():
         check_tied_parameters_on_same_device,
         find_tied_parameters,
         get_balanced_memory,
+        get_max_memory,
         load_offloaded_weights,
         offload_weight,
         save_offload_index,
@@ -149,20 +149,6 @@ def no_init_weights(_enable=True):
         yield
     finally:
         _init_weights = old_init_weights
-
-
-try:
-    from torch.nn import Identity
-except ImportError:
-    # Older PyTorch compatibility
-    class Identity(nn.Module):
-        r"""A placeholder identity operator that is argument-insensitive."""
-
-        def __init__(self, *args, **kwargs):
-            super().__init__()
-
-        def forward(self, input):
-            return input
 
 
 def get_parameter_device(parameter: Union[nn.Module, GenerationMixin, "ModuleUtilsMixin"]):
@@ -305,7 +291,7 @@ def shard_checkpoint(
 
     <Tip warning={true}>
 
-    If one of the model's weight is bigger that `max_sahrd_size`, it will end up in its own sub-checkpoint which will
+    If one of the model's weight is bigger than `max_shard_size`, it will end up in its own sub-checkpoint which will
     have a size greater than `max_shard_size`.
 
     </Tip>
@@ -663,7 +649,7 @@ def _load_state_dict_into_meta_model(
     #   they won't get loaded.
 
     if is_quantized:
-        from .utils.bitsandbytes import set_module_quantized_tensor_to_device
+        from .integrations import set_module_quantized_tensor_to_device
 
     error_msgs = []
 
@@ -1217,8 +1203,9 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         Returns:
             `bool`: Whether this model can generate sequences with `.generate()`.
         """
-        # Detects whether `prepare_inputs_for_generation` has been overwritten, which is a requirement for generation
-        if "GenerationMixin" in str(cls.prepare_inputs_for_generation):
+        # Detects whether `prepare_inputs_for_generation` has been overwritten, which is a requirement for generation.
+        # Alternativelly, the model can also have a custom `generate` function.
+        if "GenerationMixin" in str(cls.prepare_inputs_for_generation) and "GenerationMixin" in str(cls.generate):
             return False
         return True
 
@@ -2577,11 +2564,11 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             if quantization_method_from_config == QuantizationMethod.GPTQ:
                 quantization_config = GPTQConfig.from_dict(config.quantization_config)
                 config.quantization_config = quantization_config
-            logger.info(
-                f"Overriding torch_dtype={torch_dtype} with `torch_dtype=torch.float16` due to "
-                "requirements of `auto-gptq` to enable model quantization "
-            )
-            torch_dtype = torch.float16
+            if torch_dtype is None:
+                torch_dtype = torch.float16
+            else:
+                logger.info("We suggest you to set `torch_dtype=torch.float16` for better efficiency with GPTQ.")
+
             quantizer = GPTQQuantizer.from_dict(quantization_config.to_dict())
 
         if (
@@ -2960,7 +2947,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             keep_in_fp32_modules = []
 
         if load_in_8bit or load_in_4bit:
-            from .utils.bitsandbytes import get_keys_to_not_convert, replace_with_bnb_linear
+            from .integrations import get_keys_to_not_convert, replace_with_bnb_linear
 
             llm_int8_skip_modules = quantization_config.llm_int8_skip_modules
             load_in_8bit_fp32_cpu_offload = quantization_config.llm_int8_enable_fp32_cpu_offload
@@ -3093,7 +3080,13 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                     max_memory=max_memory,
                     **device_map_kwargs,
                 )
+            else:
+                max_memory = get_max_memory(max_memory)
+            if getattr(model, "quantization_method", None) == QuantizationMethod.BITS_AND_BYTES:
+                # need more space for buffers that are created during quantization
+                max_memory = {key: val * 0.90 for key, val in max_memory.items()}
             device_map_kwargs["max_memory"] = max_memory
+
             # Make sure tied weights are tied before creating the device map.
             model.tie_weights()
             device_map = infer_auto_device_map(model, dtype=target_dtype, **device_map_kwargs)
@@ -3278,7 +3271,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
     ):
         is_safetensors = False
         if is_quantized:
-            from .utils.bitsandbytes import set_module_quantized_tensor_to_device
+            from .integrations import set_module_quantized_tensor_to_device
 
         if device_map is not None and "disk" in device_map.values():
             archive_file = (
@@ -3575,11 +3568,11 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                             if param.device == torch.device("meta"):
                                 if not (is_quantized):
                                     set_module_tensor_to_device(
-                                        model, key, "cpu", torch.empty(*param.size(), dtype=dtype)
+                                        model_to_load, key, "cpu", torch.empty(*param.size(), dtype=dtype)
                                     )
                                 else:
                                     set_module_quantized_tensor_to_device(
-                                        model, key, "cpu", torch.empty(*param.size(), dtype=dtype)
+                                        model_to_load, key, "cpu", torch.empty(*param.size(), dtype=dtype)
                                     )
                 else:
                     error_msgs += _load_state_dict_into_model(model_to_load, state_dict, start_prefix)
