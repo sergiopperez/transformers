@@ -1254,7 +1254,10 @@ class NVGPTForCausalLM(NVGPTPreTrainedModel):
                             num_attention_heads=nemo_cfg['num_attention_heads'],
                             normalization=nemo_cfg['normalization'],
             )
-            
+            mcore_gpt = nemo_cfg.get('mcore_gpt', False)
+            if mcore_gpt:
+                mcore_to_nemo_mapping = cls._build_mcore_nemo_key_mapping(nemo_cfg)
+
             # Initialize and cast weights
             dtype = torch.bfloat16 if nemo_cfg['precision'] == 'bf16' else torch.float16
             model = cls(config).to(dtype)
@@ -1266,6 +1269,9 @@ class NVGPTForCausalLM(NVGPTPreTrainedModel):
             ckpt_keys = list(checkpoint.keys())
             
             for key in ckpt_keys:
+                if mcore_gpt:
+                    key = mcore_to_nemo_mapping[key] # Convert to NeMo GPT key
+
                 if not 'output_layer' in key:
                     new_key = key.replace('language_model.','').replace('encoder.','').replace('word_embeddings.','')
                 else:
@@ -1277,3 +1283,47 @@ class NVGPTForCausalLM(NVGPTPreTrainedModel):
             model.load_state_dict(checkpoint)
             del checkpoint
         return model
+    
+    # taken from https://github.com/NVIDIA/NeMo/pull/7730
+    def _build_mcore_nemo_key_mapping(nemo_cfg, use_O2_prefix=None):
+        num_layers = nemo_cfg.get(num_layers, None)
+        has_bias = nemo_cfg.get("bias", True)
+        if use_O2_prefix is None:
+            use_O2_prefix = nemo_cfg.get('megatron_amp_O2', False)
+        model_str = 'model.module' if use_O2_prefix else 'model'
+        # For GPT there is a 1:1 mapping of keys
+        mcore_to_nemo_mapping = {
+            f"{model_str}.embedding.word_embeddings.weight": "model.language_model.embedding.word_embeddings.weight",
+            f"{model_str}.decoder.final_layernorm.bias": "model.language_model.encoder.final_layernorm.bias",
+            f"{model_str}.decoder.final_layernorm.weight": "model.language_model.encoder.final_layernorm.weight",
+        }
+        if not nemo_cfg.get("share_embeddings_and_output_weights", True):
+            mcore_to_nemo_mapping[f"{model_str}.output_layer.weight"] = "model.language_model.output_layer.weight"
+        if nemo_cfg.get("position_embedding_type", 'learned_absolute') == 'rope':
+            mcore_to_nemo_mapping[f"{model_str}.rotary_pos_emb.inv_freq"] = "model.language_model.rotary_pos_emb.inv_freq"
+        else:
+            mcore_to_nemo_mapping[
+                f"{model_str}.embedding.position_embeddings.weight"
+            ] = "model.language_model.embedding.position_embeddings.weight"
+        nemo_prefix = "model.language_model.encoder.layers"
+        mcore_prefix = f"{model_str}.decoder.layers"
+        for i in range(num_layers):
+            for wb in ('weight', 'bias') if has_bias else ('weight',):
+                mcore_to_nemo_mapping.update(
+                    {
+                        f"{mcore_prefix}.{i}.mlp.linear_fc2.{wb}": f"{nemo_prefix}.{i}.mlp.dense_4h_to_h.{wb}",
+                        f"{mcore_prefix}.{i}.mlp.linear_fc1.{wb}": f"{nemo_prefix}.{i}.mlp.dense_h_to_4h.{wb}",
+                        f"{mcore_prefix}.{i}.self_attention.linear_proj.{wb}": f"{nemo_prefix}.{i}.self_attention.dense.{wb}",
+                        f"{mcore_prefix}.{i}.self_attention.linear_qkv.{wb}": f"{nemo_prefix}.{i}.self_attention.query_key_value.{wb}",
+                    }
+                )
+            # layernorm layers always have bias!
+            for wb in ('weight', 'bias'):
+                mcore_to_nemo_mapping.update(
+                    {
+                        f"{mcore_prefix}.{i}.self_attention.linear_qkv.layer_norm_{wb}": f"{nemo_prefix}.{i}.input_layernorm.{wb}",
+                        f"{mcore_prefix}.{i}.mlp.linear_fc1.layer_norm_{wb}": f"{nemo_prefix}.{i}.post_attention_layernorm.{wb}",
+                    }
+                )
+
+        return mcore_to_nemo_mapping    
