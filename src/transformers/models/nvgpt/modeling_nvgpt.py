@@ -1287,7 +1287,7 @@ class NVGPTForCausalLM(NVGPTPreTrainedModel):
     # taken from https://github.com/NVIDIA/NeMo/pull/7730
     def _build_mcore_nemo_key_mapping(nemo_cfg, use_O2_prefix=None):
         num_layers = nemo_cfg.get(num_layers, None)
-        has_bias = nemo_cfg.get("bias", True)
+        has_bias = nemo_cfg.get("bias", False)
         if use_O2_prefix is None:
             use_O2_prefix = nemo_cfg.get('megatron_amp_O2', False)
         model_str = 'model.module' if use_O2_prefix else 'model'
