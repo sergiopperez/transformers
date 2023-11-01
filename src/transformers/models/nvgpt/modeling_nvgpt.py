@@ -271,9 +271,9 @@ class NVGPTLayerNorm1P(torch.nn.LayerNorm):
     elementwise_affine: bool
 
     def __init__(self, normalized_shape: _shape_t, eps: float = 1e-5, elementwise_affine: bool = True,
-                 device=None, dtype=None) -> None:
+                 device=None, dtype=None, bias=True) -> None:
         
-        super().__init__(normalized_shape, eps, elementwise_affine, device, dtype)
+        super().__init__(normalized_shape=normalized_shape, eps=eps, elementwise_affine=elementwise_affine, bias=bias, device=device, dtype=dtype)
 
     def forward(self, input: Tensor) -> Tensor:
         return torch.nn.functional.layer_norm(
@@ -287,8 +287,8 @@ class NVGPTLayerNorm(torch.nn.LayerNorm):
 
     def __init__(self, normalized_shape: _shape_t, eps: float = 1e-5, elementwise_affine: bool = True,
                  device=None, dtype=None) -> None:
-        
-        super().__init__(normalized_shape, eps, elementwise_affine, device, dtype)
+                
+        super().__init__(normalized_shape=normalized_shape, eps=eps, elementwise_affine=elementwise_affine, bias=bias, device=device, dtype=dtype)
 
     def forward(self, input: Tensor) -> Tensor:
         return torch.nn.functional.layer_norm(
