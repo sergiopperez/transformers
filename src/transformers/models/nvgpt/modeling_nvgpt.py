@@ -384,16 +384,13 @@ class NVGPTMLP(nn.Module):
         config: NVGPTConfig,
     ):
         super().__init__()
-        self.dense_h_to_4h = torch.nn.Linear(config.hidden_size, 2 * config.ffn_hidden_size, bias=config.bias)
+        self.dense_h_to_4h = torch.nn.Linear(config.hidden_size, config.ffn_hidden_size, bias=config.bias)
         self.dense_4h_to_h = torch.nn.Linear(config.ffn_hidden_size, config.hidden_size, bias=config.bias)        
         self.activation_func = ACT2FN[config.activation]
 
-    def forward(self, x):        
+    def forward(self, x):
         intermediate_parallel = self.dense_h_to_4h(x)
-
-        intermediate_parallel, intermediate_parallel_2 = torch.chunk(intermediate_parallel, 2, dim=-1)
-        intermediate_parallel = self.activation_func(intermediate_parallel) * intermediate_parallel_2
-
+        intermediate_parallel = self.activation_func(intermediate_parallel)
         return self.dense_4h_to_h(intermediate_parallel)
     
 class NVGPTCoreAttention(torch.nn.Module):
@@ -423,7 +420,6 @@ class NVGPTCoreAttention(torch.nn.Module):
         # ===================================
         # Raw attention scores. [b, np, s, s]
         # ===================================        
-
         if past_key_values is not None:
             past_key, past_value = past_key_values            
             key_layer = torch.cat((past_key.type_as(key_layer), key_layer), dim=0)
@@ -659,7 +655,6 @@ class NVGPTAttention(torch.nn.Module):
         
         self.query_key_value = nn.Linear(self.hidden_size, 3 * self.num_attention_heads * self.hidden_size_per_attention_head, bias=config.bias)
         self.dense = nn.Linear(self.num_attention_heads * self.hidden_size_per_attention_head, self.hidden_size, bias=config.bias)
-
         self.core_attention = NVGPTCoreAttention(config=config)
         if self.use_flash_attention:
             if self.use_native_pytorch_flash_attention:
@@ -690,8 +685,6 @@ class NVGPTAttention(torch.nn.Module):
         # =====================
         # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
         mixed_x_layer = self.query_key_value(hidden_states)
-                
-        
         # [sq, b, (np * 3 * hn)] --> [sq, b, np, 3 * hn]
         new_tensor_shape = mixed_x_layer.size()[:-1] + (
             self.num_attention_heads,
@@ -795,7 +788,7 @@ class NVGPTDecoderLayer(nn.Module):
         residual = hidden_states
         # Layer norm at the beginning of the transformer layer.
         hidden_states = self.input_layernorm(hidden_states)
-        
+        copy_layernorm = hidden_states
         # Self Attention
         hidden_states, attention_weights, present_key_value = self.self_attention(
             hidden_states=hidden_states,
@@ -979,9 +972,7 @@ class NVGPTModel(NVGPTPreTrainedModel):
         if input_embeddings is None:
             input_embeddings = self.embedding(input_ids)
             input_embeddings = input_embeddings.transpose(0, 1).contiguous()
-                 
         rotary_pos_emb = self.rotary_pos_emb(input_embeddings.size(0))
-
         hidden_states = input_embeddings
 
         if self.gradient_checkpointing and self.training:
@@ -1028,7 +1019,7 @@ class NVGPTModel(NVGPTPreTrainedModel):
                     use_cache=use_cache,
                 )
 
-            hidden_states = layer_outputs[0]        
+            hidden_states = layer_outputs[0]
 
             if use_cache:
                 next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
@@ -1141,12 +1132,10 @@ class NVGPTForCausalLM(NVGPTPreTrainedModel):
         )
 
         hidden_states = outputs[0]
-        
         logits = self.lm_head(hidden_states)
 
         # [s b h] -> [b s h]
         logits = logits.transpose(0,1).contiguous()
-    
         loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
@@ -1234,62 +1223,232 @@ class NVGPTForCausalLM(NVGPTPreTrainedModel):
         model.load_state_dict(new_ckpt)
         return model
 
+    @staticmethod
+    def _unpack_nemo_file(path2file: str, out_folder: str, extract_config_only: bool = False) -> str:
+        import tarfile
+        if not os.path.exists(path2file):
+            raise FileNotFoundError(f"{path2file} does not exist")
+
+        # we start with an assumption of uncompressed tar,
+        # which should be true for versions 1.7.0 and above
+        tar_header = "r:"
+        try:
+            tar_test = tarfile.open(path2file, tar_header)
+            tar_test.close()
+        except tarfile.ReadError:
+            # can be older checkpoint => try compressed tar
+            tar_header = "r:gz"
+        tar = tarfile.open(path2file, tar_header)
+        if not extract_config_only:
+            tar.extractall(path=out_folder)
+        else:
+            members = [x for x in tar.getmembers() if ".yaml" in x.name]
+            tar.extractall(path=out_folder, members=members)
+        tar.close()
+        return out_folder
+
+    def _open_ts_array(arr_path):
+        """Opens a Zarr file array with Tensorstore with basic setting.
+
+        Arguments:
+            arr_path (Path): path to a Zarr (Tensorstore) array
+        """
+        import tensorstore as ts
+        spec = {'driver': 'zarr', 'metadata_key': '.zarray', 'kvstore': {}}
+        spec['kvstore'] = {
+            'driver': 'file',
+            'path': str(arr_path),
+        }
+        try:
+            arr = ts.open(ts.Spec(spec), open=True).result()
+        except Exception as e:
+            raise CheckpointingException(f'Array {arr_path} could not be loaded. Error: {e}') from e
+        return arr
+
+    def _get_num_layer(element_name: str) -> str:
+        """Returns the layer number of the element based on the name
+            If name is of type shard_x_y.pt -> return x
+            If name is of type x.y -> return x
+            If name is of type x.y.z -> return x
+            Else -> NotimplementedError
+
+        Arguments:
+            element (str): name of the element to extract the layer number.
+        """
+        import re
+        numbers_pattern = r'\d+'
+        allowed_patterns = [
+                re.compile(fr'shard_{numbers_pattern}_{numbers_pattern}.pt'),
+                re.compile(fr'{numbers_pattern}.{numbers_pattern}'),
+                re.compile(fr'{numbers_pattern}.{numbers_pattern}.{numbers_pattern}')
+            ]
+        if any(pattern.match(element_name) for pattern in allowed_patterns):
+            all_numbers = re.findall(numbers_pattern, element_name)
+            return all_numbers[0]
+        else:
+            raise NotImplementedError(f"The name of the file {element_name} does not match any of the allowed patterns")
+
+    def postprocess_numpy_array(loaded_array):
+        """When loading Zarr arrays in bfloat16 format they cannot be converted to torch.tensor in bfloat16 right away.
+        This function does that
+        """
+        import numpy as np
+        x = loaded_array
+        if x.dtype == np.dtype('bfloat16'):
+            try:
+                x = x.astype(np.dtype('float32'))
+                x = torch.from_numpy(x)
+                x = x.bfloat16()
+            except Exception as e:
+                import code; code.interact(local=dict(globals(), **locals()))
+                raise e
+        else:
+            x = torch.from_numpy(x)
+        return x
+
+
+    def _load_element(cls, element, ten = None, layer_num = None):
+        """Loads the element (of a NeMo model) in the Path which can be:
+            - *pt -> use torch.load
+            - weights in the zarr format -> use the tensorstore library through the open_ts_array function.
+
+        Arguments:
+            element (Path): Path to a .pt tensor or a Zarr (Tensorstore) array.
+        """
+        from copy import deepcopy
+
+        content = None
+        if element.endswith(".pt"):
+            content = torch.load(element)
+        else:
+            if ten is None:
+                ten = deepcopy(cls._open_ts_array(os.path.dirname(element)).read().result())
+            try:
+                folder_with_tensor = os.path.basename(os.path.dirname(element))
+                if folder_with_tensor.endswith("output_layer.weight") or \
+                        folder_with_tensor.endswith(".bias") or \
+                        "final_layernorm" in folder_with_tensor or \
+                        "word_embeddings.weight" in folder_with_tensor:
+                    content = ten
+                elif "layer_norm" in folder_with_tensor or \
+                        folder_with_tensor.endswith(".weight"):
+                    content = ten[layer_num]
+                else:
+                    import code; code.interact(local=dict(globals(), **locals()))
+                    raise NotImplementedError
+            except Exception as e:
+                import code; code.interact(local=dict(globals(), **locals()))
+                raise e
+            assert content is not None, "content is None when loading element from nemo model. You should implement a better _load_element function in the modeling class."
+            content = cls.postprocess_numpy_array(content)
+        return content, ten
+
+    def _search_most_similar(list_of_keys, key):
+        """Returns the key of the list_of_keys that is most similar to key.
+        """
+        from difflib import get_close_matches
+        closest_matches = get_close_matches(key, list_of_keys)
+        return closest_matches
+
     @classmethod
     def from_nemo_file(cls, nemo_file):
-        import tarfile
         import yaml
-        #from configuration_nvgpt import NVGPTConfig
+        import glob
+        import tempfile
+        import contextlib
+        from pathlib import Path
+        from copy import deepcopy
 
-        with tarfile.open(nemo_file) as tar:
-            # Instantiate the model first, then load weights
-            try:
-                nemo_cfg = yaml.safe_load(tar.extractfile('model_config.yaml').read())
-            except:
-                nemo_cfg = yaml.safe_load(tar.extractfile('./model_config.yaml').read())
+        # Here we will save the restored weights from the nemo model and its original keys
+        common_state_dict = None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp = cls._unpack_nemo_file(nemo_file, tmpdir)
 
+            nemo_cfg = None
+            with open(Path(temp) / "model_config.yaml") as handle:
+                nemo_cfg = yaml.safe_load(handle)
+
+            def _nemo_activation_to_hf(activation: str):
+                if activation in ["gelu", "geglu", "fast-geglu"]:
+                    activation_func = "gelu"
+                elif activation in ["reglu", "fast-reglu"]:
+                    activation_func = "relu"
+                elif activation in ["swiglu", "fast-swiglu"]:
+                    # SiLU or sigmoid linear unit is the same as swish with beta = 1 (which is what https://arxiv.org/pdf/2002.05202.pdf uses.)
+                    activation_func = "silu"
+                elif activation == "squared-relu":
+                    activation_func = "relu2"
+                else:
+                    ValueError(f"The activation {activation} is not supported for conversion fron NeMo to HF")
+                return activation_func
             config = NVGPTConfig(
                             hidden_size=nemo_cfg['hidden_size'],
                             ffn_hidden_size=nemo_cfg['ffn_hidden_size'],
                             num_layers=nemo_cfg['num_layers'],
                             num_attention_heads=nemo_cfg['num_attention_heads'],
+                            activation=_nemo_activation_to_hf(nemo_cfg['activation']),
                             normalization=nemo_cfg['normalization'],
+                            max_position_embeddings=nemo_cfg['max_position_embeddings']
             )
+            # Note that some of the other parameters, like the vocab size, may need to be manually tuned in the configuratio_nvgpt.py
+
             mcore_gpt = nemo_cfg.get('mcore_gpt', False)
             if mcore_gpt:
                 mcore_to_nemo_mapping = cls._build_mcore_nemo_key_mapping(nemo_cfg)
 
             # Initialize and cast weights
-            dtype = torch.bfloat16 if nemo_cfg['precision'] == 'bf16' else torch.float16
+            dtype = torch.bfloat16 if "bf16" in nemo_cfg['precision'] else torch.float16
             model = cls(config).to(dtype)
 
-            try:
-                checkpoint = torch.load(tar.extractfile('model_weights.ckpt'))  
-            except:
-                checkpoint = torch.load(tar.extractfile('./model_weights.ckpt'))
-            ckpt_keys = list(checkpoint.keys())
-            
-            for key in ckpt_keys:
-                if mcore_gpt:
-                    key = mcore_to_nemo_mapping[key] # Convert to NeMo GPT key
+            hf_keys = model.state_dict().keys()
 
-                if not 'output_layer' in key:
-                    new_key = key.replace('language_model.','').replace('encoder.','').replace('word_embeddings.','')
-                else:
-                    new_key = key.replace('model.language_model.','').replace('encoder.','').replace('word_embeddings.','').replace('output_layer','lm_head')
+            common_state_dict = torch.load(Path(temp) / "model_weights" / "common.pt", map_location='cpu')
 
-                checkpoint[new_key] = checkpoint[key]
-                del checkpoint[key]            
+            for directory in glob.glob(str(Path(temp) / "model_weights" / "*/")):
+                if os.path.isdir(directory):
+                    print(f"Loading {directory}")
+                    ten = None
+                    for element in glob.glob(str(Path(directory) / '*')):
+                        # This if filters all extra states from the common_state_dict, TODO: check what the extra states do.
+                        if not element.endswith(".pt"):
+                            layer_num = None
+                            if "layers" in directory:
+                                element_name = os.path.basename(element)
+                                layer_num = int(cls._get_num_layer(element_name))
+                                key_name = os.path.basename(directory).replace("layers.", f"layers.{layer_num}.") 
+                            else:
+                                key_name = os.path.basename(os.path.dirname(element))
 
-            model.load_state_dict(checkpoint)
-            del checkpoint
+                            mapped_key = None
+                            if mcore_gpt:
+                                mapped_key = mcore_to_nemo_mapping[key_name] # Convert to NeMo GPT key
+                                if not mapped_key in hf_keys:
+                                    mapped_key = mapped_key.replace('language_model.','').replace('encoder.','').replace('word_embeddings.','').replace("model.output_layer", "lm_head")
+                            else:
+                                raise NotImplementedError
+                            if mapped_key not in hf_keys:
+                                hf_key = cls._search_most_similar(hf_keys, mapped_key)
+                                print(key_name, mapped_key, '\t-->\t', hf_key)
+                                raise NotImplementedError
+                            else:
+                                if mapped_key is None:
+                                    raise NotImplementedError
+                                content, ten = cls._load_element(cls, element, ten, layer_num)
+                                common_state_dict[mapped_key] = content
+            # Add model.rotary_pos_emb.inv_freq to common_state dict
+            common_state_dict["model.rotary_pos_emb.inv_freq"] = model.state_dict()["model.rotary_pos_emb.inv_freq"]
+
+        model.load_state_dict(common_state_dict)
+        del common_state_dict
         return model
-    
+
     # taken from https://github.com/NVIDIA/NeMo/pull/7730
     def _build_mcore_nemo_key_mapping(nemo_cfg, use_O2_prefix=None):
-        num_layers = nemo_cfg.get(num_layers, None)
+        num_layers = nemo_cfg.get("num_layers", None)
         has_bias = nemo_cfg.get("bias", False)
         if use_O2_prefix is None:
-            use_O2_prefix = nemo_cfg.get('megatron_amp_O2', False)
+#             use_O2_prefix = nemo_cfg.get('megatron_amp_O2', False)
+            use_O2_prefix = False # Fix to be able to match model_str to be able to match model_str
         model_str = 'model.module' if use_O2_prefix else 'model'
         # For GPT there is a 1:1 mapping of keys
         mcore_to_nemo_mapping = {
@@ -1325,5 +1484,4 @@ class NVGPTForCausalLM(NVGPTPreTrainedModel):
                         f"{mcore_prefix}.{i}.mlp.linear_fc1.layer_norm_{wb}": f"{nemo_prefix}.{i}.post_attention_layernorm.{wb}",
                     }
                 )
-
-        return mcore_to_nemo_mapping    
+        return mcore_to_nemo_mapping

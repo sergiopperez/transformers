@@ -91,7 +91,7 @@ class NVGPTConfig(PretrainedConfig):
 
     def __init__(
         self,
-        vocab_size=256000,
+        vocab_size=50304,
         hidden_size=2048,
         ffn_hidden_size=5440,
         num_layers=24,
